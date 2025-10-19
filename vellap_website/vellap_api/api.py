@@ -15,7 +15,7 @@ def register_customer(**data):
     first_name = data.get("first_name")
     last_name = data.get("last_name")
     phone = data.get("phone")
-
+    company_name = data.get("company_name")
     address_line1 = data.get("address_line1")
     address_line2 = data.get("address_line2")
     city = data.get("city")
@@ -42,10 +42,11 @@ def register_customer(**data):
         # 2 Create linked Customer
         customer = frappe.get_doc({
             "doctype": "Customer",
-            "customer_name": f"{first_name} {last_name}".strip(),
+            "customer_name": company_name,
             "customer_type": "Individual",
             "email_id": email,
-            "mobile_no": phone
+            "mobile_no": phone,
+            "customer_type":"Company"
         })
         customer.insert(ignore_permissions=True)
 
@@ -78,7 +79,7 @@ def register_customer(**data):
         return {
             "status": "success",
             "message": "Customer registered successfully.",
-            "redirect": "/all-products"
+            "redirect": "login"
             }
     else: 
         return {

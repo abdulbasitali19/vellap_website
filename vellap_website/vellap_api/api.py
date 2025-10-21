@@ -3,118 +3,110 @@ from frappe import _
 from frappe.auth import LoginManager
 
 
-### Function 2: Login Customer
-
-
 @frappe.whitelist(allow_guest=True)
 def login_customer(email, password):
-    """Logs in an existing user and sets the session."""
-    
+    """Logs in an existing website user and ensures session + cookie consistency."""
     try:
+        # Initialize and authenticate login
         login_manager = LoginManager()
         login_manager.authenticate(email, password)
-        login_manager.post_login()
+        login_manager.post_login()  # Properly sets session + roles
 
-        # Explicitly ensure the session roles are current (for safety)
-        frappe.local.session.update({"user": email, "user_roles": frappe.get_roles(email)})
-        
-        # Set session ID in response for client-side handling
-        frappe.local.response["session_id"] = frappe.session.sid
+        # Ensure session contains updated info
+        frappe.local.session_obj.update({
+            "user": email,
+            "user_roles": frappe.get_roles(email)
+        })
+        frappe.db.commit()
+
+        # Set session cookies for browser (important for navigation)
+        frappe.local.cookie_manager.init_cookies()
 
         return {
             "status": "success",
             "message": _("Login successful."),
+            "session_id": frappe.session.sid,
+            "user": email,
             "redirect": "/all-products"
         }
-    
+
     except Exception as e:
-        frappe.log_error(message=str(e), title="Customer Login Failed (Step 2)")
+        frappe.log_error(message=str(e), title="Customer Login Failed")
         return {
             "status": "error",
-            "message": _("Login failed. Check credentials.")
+            "message": _("Login failed. Check credentials."),
         }
 
 
 @frappe.whitelist(allow_guest=True)
 def register_customer(**data):
     """
-    Registers a new Customer (User, Customer Doc, Role, Address) and logs them in.
-    The function ensures the user's cache is cleared to prevent 'Not Permitted' errors.
+    Registers a new website user as a Customer and links Address.
+    Then logs them in automatically.
     """
-
-    # --- Data Extraction ---
     email = data.get("email")
     password = data.get("password")
-    
-    # Consolidate and clean up data retrieval
+
     first_name = data.get("first_name")
     last_name = data.get("last_name")
     phone = data.get("phone")
     company_name = data.get("company_name")
-    
+
     address_line1 = data.get("address_line1")
     address_line2 = data.get("address_line2")
     city = data.get("city")
     postal_code = data.get("postal_code")
     country = data.get("country")
-    
-    customer_name = company_name or f"{first_name} {last_name}".strip()
+
+    customer_name = company_name or f"{first_name or ''} {last_name or ''}".strip()
     customer_type = "Company" if company_name else "Individual"
 
-    # --- Check for Existing User ---
-    user_name = frappe.db.get_value("User", {"email": email})
-    
-    if user_name: 
+    # --- Check if user already exists ---
+    if frappe.db.exists("User", {"email": email}):
         return {
             "status": "exists",
             "message": _("User already exists. Please log in."),
-            "redirect": "login"
+            "redirect": "login",
         }
 
-    # --- Create New Customer and Docs ---
     try:
-        # 1. Create new Website User
+        # 1️. Create new Website User
         new_user = frappe.get_doc({
             "doctype": "User",
             "email": email,
-            "first_name": first_name or email.split("@")[0],
+            "first_name": first_name or (email.split("@")[0] if email else ""),
             "last_name": last_name,
             "mobile_no": phone,
             "send_welcome_email": 0,
             "enabled": 1,
             "new_password": password,
-            "user_type": "Website User"
+            "user_type": "Website User",
         })
         new_user.insert(ignore_permissions=True)
-        
-        # 2. Create linked Customer
+
+        # 2️. Create linked Customer
         customer = frappe.get_doc({
             "doctype": "Customer",
             "customer_name": customer_name,
             "customer_type": customer_type,
             "email_id": email,
-            "mobile_no": phone
+            "mobile_no": phone,
         })
         customer.insert(ignore_permissions=True)
-        
-        # 3. Assign Customer Role
-        # Check is technically redundant here since it's a new user, but is good practice.
+
+        # 3️. Assign "Customer" Role
         if not frappe.db.exists("Has Role", {"parent": new_user.name, "role": "Customer"}):
             frappe.get_doc({
                 "doctype": "Has Role",
                 "parent": new_user.name,
                 "parenttype": "User",
                 "parentfield": "roles",
-                "role": "Customer"
+                "role": "Customer",
             }).insert(ignore_permissions=True)
 
-        # CRITICAL STEP: Clear User Cache to load new roles immediately
-        frappe.clear_cache(user=email) 
-        
-        # Commit User, Customer, and Role before attempting login
         frappe.db.commit()
 
-        # 4. Create linked Address
+        # 4️. Create linked Address
         address = frappe.get_doc({
             "doctype": "Address",
             "address_title": customer_name,
@@ -125,26 +117,23 @@ def register_customer(**data):
             "country": country,
             "phone": phone,
             "links": [
-                { "link_doctype": "Customer", "link_name": customer.name },
-                { "link_doctype": "User", "link_name": new_user.name } # Link to User here
-            ]
+                {"link_doctype": "Customer", "link_name": customer.name},
+                {"link_doctype": "User", "link_name": new_user.name},
+            ],
         })
         address.insert(ignore_permissions=True)
-        
-        # Final commit for the entire transaction
-        frappe.db.commit() 
-        return {
-            "status": "success",
-            "message": _("Registration successful."),
-            "email": email,
-            "password": data.get("password")
-        }
-        
+
+        # 5️. Final commit and clear cache
+        frappe.db.commit()
+        frappe.clear_cache(user=email)
+
+        # 6️. Auto-login newly registered customer
+        return login_customer(email, password)
+
     except Exception as e:
-        # Rollback in case of error during Doc creation
-        frappe.db.rollback() 
+        frappe.db.rollback()
         frappe.log_error(message=str(e), title="Customer Registration Failed")
         return {
             "status": "error",
-            "message": _("Registration failed: ") + str(e)
+            "message": _("Registration failed: ") + str(e),
         }

@@ -1,104 +1,91 @@
 import frappe
 from frappe import _
-from frappe.auth import LoginManager
+from frappe.auth import LoginManager, CookieManager
+from frappe.utils.password import get_decrypted_password
+
+
+def generate_api_token_for_user(user):
+    """Generate (or return existing) API Key + Secret for user."""
+    user_doc = frappe.get_doc("User", user)
+    if not user_doc.api_key:
+        user_doc.api_key = frappe.generate_hash(length=15)
+    api_secret = frappe.generate_hash(length=15)
+    user_doc.api_secret = api_secret
+    user_doc.save(ignore_permissions=True)
+    frappe.db.commit()
+    return user_doc.api_key, api_secret
 
 
 @frappe.whitelist(allow_guest=True)
 def login_customer(email, password):
-    """Logs in an existing website user and ensures session + cookie consistency."""
+    """Authenticate user and return session + token."""
     try:
-        # Initialize and authenticate login
         login_manager = LoginManager()
         login_manager.authenticate(email, password)
-        login_manager.post_login()  # Properly sets session + roles
+        login_manager.post_login()
 
-        # Ensure session contains updated info
-        frappe.local.session_obj.update({
-            "user": email,
-            "user_roles": frappe.get_roles(email)
-        })
-        frappe.db.commit()
+        # Generate token for API use
+        api_key, api_secret = generate_api_token_for_user(email)
 
-        # Set session cookies for browser (important for navigation)
-        frappe.local.cookie_manager.init_cookies()
+        # Optional: set session cookies for web usage
+        cookie_mgr = CookieManager()
+        cookie_mgr.init_cookies()
+        cookie_mgr.set_cookie("sid", frappe.session.sid, secure=True, samesite="None")
 
         return {
             "status": "success",
             "message": _("Login successful."),
             "session_id": frappe.session.sid,
             "user": email,
+            "api_key": api_key,
+            "api_secret": api_secret,
             "redirect": "/all-products"
         }
 
     except Exception as e:
         frappe.log_error(message=str(e), title="Customer Login Failed")
-        return {
-            "status": "error",
-            "message": _("Login failed. Check credentials."),
-        }
+        return {"status": "error", "message": _("Login failed. Check credentials.")}
 
 
 @frappe.whitelist(allow_guest=True)
 def register_customer(**data):
-    """
-    Registers a new website user as a Customer and links Address.
-    Then logs them in automatically.
-    """
+    """Registers new customer + creates API token."""
     email = data.get("email")
     password = data.get("password")
 
-    first_name = data.get("first_name")
-    last_name = data.get("last_name")
-    phone = data.get("phone")
-    company_name = data.get("company_name")
-
-    address_line1 = data.get("address_line1")
-    address_line2 = data.get("address_line2")
-    city = data.get("city")
-    postal_code = data.get("postal_code")
-    country = data.get("country")
-
-    customer_name = company_name or f"{first_name or ''} {last_name or ''}".strip()
-    customer_type = "Company" if company_name else "Individual"
-
-    # --- Check if user already exists ---
     if frappe.db.exists("User", {"email": email}):
-        return {
-            "status": "exists",
-            "message": _("User already exists. Please log in."),
-            "redirect": "login",
-        }
+        return {"status": "exists", "message": _("User already exists. Please log in."), "redirect": "login"}
 
     try:
-        # 1️. Create new Website User
-        new_user = frappe.get_doc({
+        # Create user
+        user = frappe.get_doc({
             "doctype": "User",
             "email": email,
-            "first_name": first_name or (email.split("@")[0] if email else ""),
-            "last_name": last_name,
-            "mobile_no": phone,
+            "first_name": data.get("first_name"),
+            "last_name": data.get("last_name"),
+            "mobile_no": data.get("phone"),
             "send_welcome_email": 0,
             "enabled": 1,
             "new_password": password,
             "user_type": "Website User",
         })
-        new_user.insert(ignore_permissions=True)
+        user.insert(ignore_permissions=True)
 
-        # 2️. Create linked Customer
+        # Create customer
         customer = frappe.get_doc({
             "doctype": "Customer",
-            "customer_name": customer_name,
-            "customer_type": customer_type,
+            "customer_name": data.get("company_name") or f"{data.get('first_name')} {data.get('last_name')}",
+            "customer_type": "Company" if data.get("company_name") else "Individual",
             "email_id": email,
-            "mobile_no": phone,
+            "mobile_no": data.get("phone"),
         })
         customer.insert(ignore_permissions=True)
 
-        # 3️. Assign "Customer" Role
-        if not frappe.db.exists("Has Role", {"parent": new_user.name, "role": "Customer"}):
+        # Add role
+        if not frappe.db.exists("Has Role", {"parent": user.name, "role": "Customer"}):
             frappe.get_doc({
                 "doctype": "Has Role",
-                "parent": new_user.name,
+                "parent": user.name,
                 "parenttype": "User",
                 "parentfield": "roles",
                 "role": "Customer",
@@ -106,34 +93,34 @@ def register_customer(**data):
 
         frappe.db.commit()
 
-        # 4️. Create linked Address
-        address = frappe.get_doc({
+        # Create linked address
+        frappe.get_doc({
             "doctype": "Address",
-            "address_title": customer_name,
-            "address_line1": address_line1,
-            "address_line2": address_line2,
-            "city": city,
-            "pincode": postal_code,
-            "country": country,
-            "phone": phone,
+            "address_title": customer.customer_name,
+            "address_line1": data.get("address_line1"),
+            "address_line2": data.get("address_line2"),
+            "city": data.get("city"),
+            "pincode": data.get("postal_code"),
+            "country": data.get("country"),
+            "phone": data.get("phone"),
             "links": [
                 {"link_doctype": "Customer", "link_name": customer.name},
-                {"link_doctype": "User", "link_name": new_user.name},
+                {"link_doctype": "User", "link_name": user.name},
             ],
-        })
-        address.insert(ignore_permissions=True)
+        }).insert(ignore_permissions=True)
 
-        # 5️. Final commit and clear cache
         frappe.db.commit()
-        frappe.clear_cache(user=email)
 
-        # 6️. Auto-login newly registered customer
-        return login_customer(email, password)
+        # Generate token immediately
+        api_key, api_secret = generate_api_token_for_user(email)
+
+        # Auto login for web session
+        login_result = login_customer(email, password)
+        login_result["api_key"] = api_key
+        login_result["api_secret"] = api_secret
+        return login_result
 
     except Exception as e:
         frappe.db.rollback()
-        frappe.log_error(message=str(e), title="Customer Registration Failed")
-        return {
-            "status": "error",
-            "message": _("Registration failed: ") + str(e),
-        }
+        frappe.log_error(str(e), "Customer Registration Failed")
+        return {"status": "error", "message": _("Registration failed: ") + str(e)}

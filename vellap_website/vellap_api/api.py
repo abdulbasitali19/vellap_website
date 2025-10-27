@@ -76,6 +76,7 @@ def register_customer(**data):
             "doctype": "Customer",
             "customer_name": data.get("company_name") or f"{data.get('first_name')} {data.get('last_name')}",
             "customer_type": "Company" if data.get("company_name") else "Individual",
+            "customer_group" : "All Customer Groups",
             "email_id": email,
             "mobile_no": data.get("phone"),
         })

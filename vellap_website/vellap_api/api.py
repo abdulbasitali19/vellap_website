@@ -125,3 +125,20 @@ def register_customer(**data):
         frappe.db.rollback()
         frappe.log_error(str(e), "Customer Registration Failed")
         return {"status": "error", "message": _("Registration failed: ") + str(e)}
+
+
+
+
+@frappe.whitelist(allow_guest=True)
+def custom_logout(redirect_to=None):
+    """
+    Logs out the current user and optionally returns a redirect URL.
+    """
+    if frappe.session.user != "Guest":
+        frappe.local.login_manager.logout()
+        frappe.db.commit()
+    
+    if redirect_to:
+        return {"message": "Logged out", "redirect": redirect_to}
+    
+    return {"message": "Logged out"}

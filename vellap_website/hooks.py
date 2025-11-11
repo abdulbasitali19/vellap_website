@@ -145,6 +145,15 @@ app_license = "mit"
 # 	}
 # }
 
+doc_events = {
+	"Ticket Automation": {
+		# "on_update": "method",
+		# "on_cancel": "method",
+		# "on_trash": "method"
+        "on_submit": "vellap_website.vellap_website.doctype.ticket_automation.ticket_automation.on_submit"
+	}
+}
+
 # Scheduled Tasks
 # ---------------
 

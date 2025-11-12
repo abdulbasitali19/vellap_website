@@ -2,15 +2,24 @@
 # For license information, please see license.txt
 
 import frappe
+from frappe import _ 
 from frappe.model.document import Document
-from frappe import _
 from erpnext.selling.doctype.quotation.quotation import _make_sales_order
 from frappe.utils import add_to_date, today, date_diff
-from datetime import timedelta  
 
 class TicketAutomation(Document):
-    # This class definition is standard and generally doesn't need modification
-    pass
+
+    def autoname(self):
+        customer_name = (self.customer or "Customer").strip().replace(" ", "")
+
+        existing_tickets = frappe.db.count(
+            "Ticket Automation",
+            filters={"customer": self.customer}
+        )
+
+        next_num = existing_tickets + 1
+        self.name = f"{customer_name}-Ticket-#{next_num:02d}"
+
 
 @frappe.whitelist()
 def get_ticket_automation_details(doc, method):
@@ -42,42 +51,51 @@ def submit_quotations(doc):
 
 
 def create_and_submit_sales_order(doc, submitted_quotations):
-    """Creates and submits a Sales Order from submitted Quotations."""
+    """Creates one Sales Order from multiple Quotations."""
     if not submitted_quotations:
         return None
 
     try:
-        # We'll create one Sales Order per Quotation (you can later combine them if needed)
-        created_sales_orders = []
+        combined_items = []
 
         for quotation_name in submitted_quotations:
-            # Call ERPNext's standard mapping function
-            so_doc = _make_sales_order(quotation_name)
-           
-            today_date = frappe.utils.getdate()
-        for term in so_doc.get("payment_schedule", []):
-            due_date = frappe.utils.getdate(term.due_date)
-            if due_date < today_date:
-                term.due_date = today_date + timedelta(days=7)
+            quotation_doc = frappe.get_doc("Quotation", quotation_name)
+            
+            for qi in quotation_doc.items:
+                combined_items.append({
+                    "item_code": qi.item_code,
+                    "item_name": qi.item_name,
+                    "description": qi.description,
+                    "qty": qi.qty,
+                    "rate": qi.rate,
+                    "uom": qi.uom,
+                })
+
+        so_doc = frappe.get_doc({
+            "doctype": "Sales Order",
+            "customer": doc.customer,
+            "company": doc.company,
+            "transaction_date": today(),
+            "delivery_date": add_to_date(today(), days=7),
+            "items": combined_items,
+        })
 
 
-            # Add any custom fields from Ticket Automation if needed
-            so_doc.customer = doc.customer
-            so_doc.ignore_permissions = True
+        # Ensure delivery_date
+        if not so_doc.delivery_date:
+            so_doc.delivery_date = add_to_date(today(), days=7)
+            so_doc.save(ignore_permissions=True)
 
-            # Insert and submit the Sales Order
-            so_doc.insert(ignore_permissions=True)
-            so_doc.submit()
+        so_doc.insert(ignore_permissions=True)
+        so_doc.submit()
 
-            frappe.msgprint(_(f"Sales Order {so_doc.name} created and submitted from Quotation {quotation_name}."))
-            created_sales_orders.append(so_doc.name)
-
-        # Return the first Sales Order (you can adjust to return all)
-        return created_sales_orders[0] if created_sales_orders else None
+        frappe.msgprint(_(f"Sales Order {so_doc.name} created from {len(submitted_quotations)} quotations."))
+        return so_doc.name
 
     except Exception as e:
-        frappe.log_error(title="Sales Order Submission Failed", message=str(e))
+        frappe.log_error(title="Sales Order Creation Failed", message=str(e))
         frappe.throw(_(f"Failed to create/submit Sales Order. Error: {e}"))
+
 
 
 
